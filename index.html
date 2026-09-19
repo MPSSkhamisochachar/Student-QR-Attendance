@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Student QR Attendance</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+*{ box-sizing:border-box; font-family:-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif; }
+body{ margin:0; padding:10px; background:#0f1724; color:#eee; min-height:100vh; }
+h1{ font-size:17px; text-align:center; margin:6px 0 12px; color:#4fc3f7; }
+h2{ font-size:14px; margin:6px 0; text-align:center; }
+.card{ background:#1a2332; padding:14px; border-radius:12px; margin-bottom:12px; }
+.status-bar{ display:flex; gap:6px; margin-bottom:10px; }
+.stat{ flex:1; padding:8px; border-radius:8px; text-align:center; font-weight:700; font-size:12px; }
+.stat-in{ background:#1a7a3c; color:#fff; }
+.stat-out{ background:#b02a2a; color:#fff; }
+.stat-dup{ background:#666; color:#fff; }
+.stat-pending{ background:#856404; color:#fff; }
+.mode-toggle{ display:flex; gap:8px; margin-bottom:12px; }
+.mode-btn{ flex:1; padding:14px; border-radius:10px; border:2px solid #2a3a52; background:#1a2332; color:#aaa; font-weight:700; font-size:15px; text-align:center; }
+.mode-btn.active-in{ background:#1a7a3c; color:#fff; border-color:#1a7a3c; }
+.mode-btn.active-out{ background:#b02a2a; color:#fff; border-color:#b02a2a; }
+#reader{ width:100%; border-radius:10px; overflow:hidden; background:#000; min-height:250px; }
+.controls{ display:flex; gap:8px; margin-top:10px; }
+.controls button{ flex:1; padding:12px; border-radius:8px; border:none; background:#1e5c9e; color:#fff; font-weight:700; font-size:14px; }
+.controls button.stop{ background:#a40000; }
+.controls button.start{ background:#176b2c; }
+.scan-feed{ max-height:280px; overflow-y:auto; margin-top:10px; }
+.feed-item{ padding:8px 10px; border-radius:8px; margin-bottom:6px; font-size:13px; display:flex; justify-content:space-between; align-items:center; }
+.feed-in{ background:#1a7a3c; color:#fff; }
+.feed-out{ background:#b02a2a; color:#fff; }
+.msg{ padding:10px; border-radius:8px; margin-top:10px; font-size:13px; text-align:center; }
+.msg-info{ background:#075a9c; color:#fff; }
+.msg-ok{ background:#1a7a3c; color:#fff; }
+.msg-err{ background:#a40000; color:#fff; }
+</style>
+</head>
+<body>
+
+<h1>📷 Student QR Attendance</h1>
+
+<div class="status-bar">
+<div class="stat stat-in" id="statIn">In: 0</div>
+<div class="stat stat-out" id="statOut">Out: 0</div>
+<div class="stat stat-dup" id="statDup">Dup: 0</div>
+<div class="stat stat-pending" id="statPending">Queue: 0</div>
+</div>
+
+<div class="mode-toggle">
+<div class="mode-btn active-in" id="modeIn" onclick="setMode('In')">🟢 TIME IN</div>
+<div class="mode-btn" id="modeOut" onclick="setMode('Out')">🔴 TIME OUT</div>
+</div>
+
+<div class="card">
+<div id="reader"></div>
+<div class="controls">
+<button class="start" id="startBtn" onclick="startScanner()">▶️ Start Scanner</button>
+<button class="stop" id="stopBtn" onclick="stopScanner()" style="display:none;">⏹️ Stop</button>
+</div>
+<div id="msg"></div>
+</div>
+
+<div class="card">
+<h2>📋 Live Scans (Today)</h2>
+<div class="scan-feed" id="feed">
+<div style="color:#666;text-align:center;padding:10px;">Scans will appear here...</div>
+</div>
+</div>
+
+<script>
+// ==================== CONFIG ====================
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw7DDnNOyO7rQCC2vVyEjhgbofy52QuJtKzQnEWlHvewTr37D1n27V4Wg3SsT0yd7hZ/exec';
+
+// ==================== STATE ====================
+let mode = 'In';
+let scanner = null;
+let scanning = false;
+let batch = [];
+let stats = { in: 0, out: 0, dup: 0 };
+let pendingQueue = [];
+let recentScans = {};
+let submitting = false;
+
+// ==================== INIT ====================
+window.addEventListener('load', function() {
+  loadQueueFromStorage();
+  updateStats();
+  setInterval(flushBatch, 2500);
+  setInterval(flushPendingQueue, 10000);
+});
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('modeIn').classList.toggle('active-in', m === 'In');
+  document.getElementById('modeOut').classList.toggle('active-out', m === 'Out');
+  showMsg('info', 'Mode: ' + (m === 'In' ? '🟢 Time In' : '🔴 Time Out'));
+}
+
+function updateStats() {
+  document.getElementById('statIn').textContent = 'In: ' + stats.in;
+  document.getElementById('statOut').textContent = 'Out: ' + stats.out;
+  document.getElementById('statDup').textContent = 'Dup: ' + stats.dup;
+  document.getElementById('statPending').textContent = 'Queue: ' + (batch.length + pendingQueue.length);
+}
+
+// ==================== SCANNER ====================
+async function startScanner() {
+  if (scanning) return;
+  try {
+    if (!scanner) scanner = new Html5Qrcode("reader");
+    scanning = true;
+    document.getElementById('startBtn').style.display = 'none';
+    document.getElementById('stopBtn').style.display = 'block';
+
+    await scanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 250 } },
+      onScanSuccess,
+      function(){}
+    );
+    showMsg('ok', '✅ Scanner started');
+  } catch (e) {
+    scanning = false;
+    document.getElementById('startBtn').style.display = 'block';
+    document.getElementById('stopBtn').style.display = 'none';
+    showMsg('err', '❌ Camera error: ' + (e.message || e.name || 'unknown') + '. Chrome settings → Site settings → Camera → Allow karein.');
+  }
+}
+
+async function stopScanner() {
+  if (!scanner || !scanning) return;
+  try {
+    await scanner.stop();
+    scanning = false;
+    document.getElementById('startBtn').style.display = 'block';
+    document.getElementById('stopBtn').style.display = 'none';
+    showMsg('info', 'Scanner stopped. Syncing...');
+    await flushBatch(true);
+  } catch (e) {}
+}
+
+function onScanSuccess(decodedText) {
+  const gr = String(decodedText || '').trim();
+  if (!gr) return;
+  const now = Date.now();
+  if (recentScans[gr] && (now - recentScans[gr]) < 5000) return;
+  recentScans[gr] = now;
+
+  batch.push({ gr: gr, type: mode });
+  addFeed(gr, mode);
+  updateStats();
+  try { if (navigator.vibrate) navigator.vibrate(80); } catch (e) {}
+  showMsg('ok', '✅ ' + gr + ' (' + mode + ')');
+}
+
+function addFeed(gr, type) {
+  const feed = document.getElementById('feed');
+  if (feed.querySelector('[style*="text-align"]')) feed.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'feed-item ' + (type === 'In' ? 'feed-in' : 'feed-out');
+  const time = new Date().toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  div.innerHTML = '<span><b>' + gr + '</b> — ' + (type === 'In' ? '🟢 In' : '🔴 Out') + '</span><span>' + time + '</span>';
+  feed.insertBefore(div, feed.firstChild);
+  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+}
+
+// ==================== SUBMIT (via POST to Apps Script) ====================
+async function flushBatch(force) {
+  if (submitting) return;
+  if (!batch.length) return;
+  if (!force && batch.length < 15) return;
+
+  submitting = true;
+  const toSend = batch.slice();
+  batch = [];
+
+  try {
+    const res = await postToServer({ action: 'markBatch', records: toSend });
+    if (res && res.success) {
+      stats.in += res.in || 0;
+      stats.out += res.out || 0;
+      stats.dup += res.duplicate || 0;
+    } else {
+      pendingQueue = pendingQueue.concat(toSend);
+      saveQueueToStorage();
+    }
+  } catch (e) {
+    pendingQueue = pendingQueue.concat(toSend);
+    saveQueueToStorage();
+  }
+  submitting = false;
+  updateStats();
+}
+
+async function flushPendingQueue() {
+  if (!navigator.onLine || submitting || !pendingQueue.length) return;
+  submitting = true;
+  const toSend = pendingQueue.slice();
+  try {
+    const res = await postToServer({ action: 'markBatch', records: toSend });
+    if (res && res.success) {
+      pendingQueue = [];
+      saveQueueToStorage();
+      stats.in += res.in || 0;
+      stats.out += res.out || 0;
+      stats.dup += res.duplicate || 0;
+      showMsg('ok', '✅ Synced ' + toSend.length + ' pending');
+    }
+  } catch (e) {}
+  submitting = false;
+  updateStats();
+}
+
+function postToServer(payload) {
+  return fetch(APPS_SCRIPT_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(payload)
+  }).then(function() {
+    // no-cors → cannot read response, assume success
+    return { success: true, in: payload.records.filter(r=>r.type==='In').length, out: payload.records.filter(r=>r.type==='Out').length };
+  });
+}
+
+// ==================== STORAGE ====================
+function saveQueueToStorage() {
+  try { localStorage.setItem('attQueue', JSON.stringify(pendingQueue)); } catch (e) {}
+}
+function loadQueueFromStorage() {
+  try {
+    const s = localStorage.getItem('attQueue');
+    if (s) pendingQueue = JSON.parse(s) || [];
+  } catch (e) { pendingQueue = []; }
+  updateStats();
+}
+
+function showMsg(type, text) {
+  const el = document.getElementById('msg');
+  el.className = 'msg msg-' + type;
+  el.textContent = text;
+}
+
+window.addEventListener('beforeunload', function() {
+  if (batch.length) {
+    pendingQueue = pendingQueue.concat(batch);
+    saveQueueToStorage();
+  }
+});
+</script>
+
+</body>
+</html>
